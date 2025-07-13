@@ -132,7 +132,7 @@ async function callGeminiAPI(videoText, apiKey, apiEndpoint) {
     prompt = `
       You are an expert at analyzing Bilibili viewer comments (danmaku) to identify sponsored segments in a video.
       You will be provided with a list of danmaku, each with an emission time (`time`) and its text (`content`).
-      The format is: `[{time: <seconds>, content: "<comment>"}, ...]`
+      The format is: [{"time": <seconds>, "content": "<comment>"}, ...]
 
       Your task is to identify the start and end times of any sponsored segments based on these danmaku.
 
@@ -316,20 +316,52 @@ function handleAdCheck() {
     const videoPlayer = document.querySelector('.html5-main-video');
     if (!videoPlayer) return;
 
-    log("YouTube ad detected. Taking action...");
+    // Only log "detected" once per ad instance
+    if (!videoPlayer.dataset.adSkipperYouTubeAdDetected) {
+        log("YouTube ad detected. Attempting to skip...");
+        videoPlayer.dataset.adSkipperYouTubeAdDetected = 'true';
+    }
+
     videoPlayer.muted = true;
     if (videoPlayer.playbackRate !== 16) videoPlayer.playbackRate = 16;
 
     const skipButton = document.querySelector('.ytp-ad-skip-button, .ytp-ad-skip-button-modern');
     if (skipButton) {
       skipButton.click();
-      log('YouTube skip button clicked.');
-      return;
+      log('YouTube: Skip button clicked.');
+      // Once clicked, the ad might disappear, so we can reset the flag
+      delete videoPlayer.dataset.adSkipperYouTubeAdDetected;
+      return; // Ad should be gone, no need for further actions
+    }
+
+    // If no skip button, it's likely a non-skippable ad
+    if (!videoPlayer.dataset.adSkipperYouTubeNonSkippableHandled) {
+        log('YouTube: Non-skippable ad detected. Force skipping...');
+        videoPlayer.dataset.adSkipperYouTubeNonSkippableHandled = 'true';
     }
 
     if (videoPlayer.duration) {
       videoPlayer.currentTime = videoPlayer.duration;
-      log('Non-skippable YouTube ad force-skipped.');
+      log('YouTube: Force-skipped by setting currentTime to duration.');
+    } else {
+      videoPlayer.currentTime = 99999;
+      log('YouTube: Force-skipped by setting currentTime to a large number.');
+    }
+
+    // Also try to remove the ad container itself
+    if (isYouTubeAdPlaying.parentNode) {
+        isYouTubeAdPlaying.parentNode.removeChild(isYouTubeAdPlaying);
+        log('YouTube: Ad container removed from DOM.');
+        // Once removed, we can reset the flags
+        delete videoPlayer.dataset.adSkipperYouTubeAdDetected;
+        delete videoPlayer.dataset.adSkipperYouTubeNonSkippableHandled;
+    }
+  } else {
+    // If no ad is showing, ensure our flags are reset for the next ad
+    const videoPlayer = document.querySelector('.html5-main-video');
+    if (videoPlayer) {
+        delete videoPlayer.dataset.adSkipperYouTubeAdDetected;
+        delete videoPlayer.dataset.adSkipperYouTubeNonSkippableHandled;
     }
   }
   
