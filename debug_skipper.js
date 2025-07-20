@@ -1,11 +1,168 @@
 // debug_skipper.js - FINAL VERSION
 
+// --- Style Injection ---
+function injectStyles() {
+  const style = document.createElement('style');
+  style.textContent = `
+    .ad-skipper-ui-container {
+      position: absolute;
+      bottom: 80px; /* Adjusted for better placement near progress bar */
+      left: 20px;
+      z-index: 99999;
+      opacity: 0;
+      transition: opacity 0.3s ease-in-out;
+      pointer-events: none;
+    }
+    .ad-skipper-ui-container.visible {
+      opacity: 1;
+      pointer-events: all;
+    }
+    .ad-skipper-prompt {
+      background-color: rgba(0, 0, 0, 0.7);
+      color: white;
+      padding: 10px 20px;
+      border-radius: 20px;
+      font-size: 14px;
+      display: flex;
+      align-items: center;
+      box-shadow: 0 2px 10px rgba(0,0,0,0.2);
+    }
+    .ad-skipper-prompt-text {
+      margin-right: 15px;
+    }
+    .ad-skipper-cancel-button {
+      background: none;
+      border: none;
+      color: #ff5c5c;
+      cursor: pointer;
+      font-size: 14px;
+      padding: 0;
+    }
+    .ad-skipper-cancel-button:hover {
+      text-decoration: underline;
+    }
+  `;
+  document.head.appendChild(style);
+}
+injectStyles();
+
+// --- UI Manager ---
+const AdSkipperUIManager = {
+  uiContainer: null,
+  skipTimeout: null,
+  isCancelled: false,
+
+  init(videoPlayer) {
+    if (!this.uiContainer) {
+      this.uiContainer = document.createElement('div');
+      this.uiContainer.className = 'ad-skipper-ui-container';
+      const playerContainer = videoPlayer.closest('.bpx-player-container');
+      if (playerContainer) {
+        playerContainer.style.position = 'relative';
+        playerContainer.appendChild(this.uiContainer);
+      } else {
+        document.body.appendChild(this.uiContainer); // Fallback
+      }
+    }
+  },
+
+  showSkipPrompt(videoPlayer, adTimestamp) {
+    this.isCancelled = false;
+    this.init(videoPlayer);
+
+    this.uiContainer.innerHTML = `
+      <div class="ad-skipper-prompt">
+        <span class="ad-skipper-prompt-text">即将为您跳过广告</span>
+        <button class="ad-skipper-cancel-button">不跳过</button>
+      </div>
+    `;
+    this.uiContainer.classList.add('visible');
+
+    const cancelButton = this.uiContainer.querySelector('.ad-skipper-cancel-button');
+    cancelButton.onclick = () => {
+      this.isCancelled = true;
+      this.hide();
+      log("Ad skip cancelled by user.");
+    };
+
+    this.skipTimeout = setTimeout(() => {
+      if (!this.isCancelled) {
+        this.executeSkip(videoPlayer, adTimestamp);
+      }
+    }, 3000);
+  },
+
+  executeSkip(videoPlayer, adTimestamp) {
+    log(`Skipping ad... setting time to ${adTimestamp.end}. Current time: ${videoPlayer.currentTime}`);
+    videoPlayer.currentTime = adTimestamp.end;
+    this.showSkippedMessage();
+  },
+
+  showSkippedMessage() {
+    this.uiContainer.innerHTML = `
+      <div class="ad-skipper-prompt">
+        <span class="ad-skipper-prompt-text">已为您跳过广告</span>
+      </div>
+    `;
+    this.uiContainer.classList.add('visible');
+    setTimeout(() => this.hide(), 2000);
+  },
+
+  hide() {
+    if (this.uiContainer) {
+      this.uiContainer.classList.remove('visible');
+    }
+    if (this.skipTimeout) {
+      clearTimeout(this.skipTimeout);
+      this.skipTimeout = null;
+    }
+  }
+};
+
 function log(message) {
   console.log(`[Ad Skipper] ${message}`);
 }
 
 // --- Bilibili AI Ad Skipper ---
 async function getBilibiliVideoText(bvid) {
+  const FORCE_SUBTITLE_TEST = false; // Set to true to test subtitle fetching, false for normal operation.
+
+  if (FORCE_SUBTITLE_TEST) {
+    log("--- SUBTITLE TEST MODE ACTIVE ---");
+    try {
+      const pageListUrl = `https://api.bilibili.com/x/player/pagelist?bvid=${bvid}`;
+      const pageListResponse = await fetch(pageListUrl);
+      const pageListData = await pageListResponse.json();
+      if (pageListData.code !== 0 || !pageListData.data?.[0]?.cid) {
+        throw new Error("Failed to get CID for subtitle test.");
+      }
+      const cid = pageListData.data[0].cid;
+
+      const subtitleApiUrl = `https://api.bilibili.com/x/player/v2?cid=${cid}&bvid=${bvid}`;
+      log(`Fetching subtitle list from: ${subtitleApiUrl}`);
+      const response = await fetch(subtitleApiUrl);
+      const data = await response.json();
+
+      if (data.code === 0 && data.data.subtitle?.subtitles?.length > 0) {
+          let subtitleUrl = data.data.subtitle.subtitles[0].subtitle_url;
+          if (subtitleUrl.startsWith('http://')) {
+              subtitleUrl = subtitleUrl.replace('http://', 'https://');
+          }
+          log(`Found subtitle URL: ${subtitleUrl}`);
+          const subtitleResponse = await fetch(subtitleUrl);
+          const subtitleData = await subtitleResponse.json();
+          console.log("--- Successfully Fetched Subtitle JSON: ---");
+          console.log(subtitleData); // Log the full subtitle JSON for inspection
+          return null; // Stop further execution in test mode
+      } else {
+        log("No subtitles found for this video.");
+      }
+    } catch (error) {
+        log(`Error during subtitle test: ${error}`);
+    }
+    return null; // Stop further execution in test mode
+  }
+
   log("Attempting to extract Bilibili video text (subtitles/danmaku)...");
 
   // --- 1. Get CID ---
@@ -61,7 +218,8 @@ async function getBilibiliVideoText(bvid) {
 
         // Reverting to a stricter filtering logic. The "Chinese+Number" heuristic was too broad.
         const adKeywords = ['广告', '恰饭', '赞助', '付费', '推广']; // High-confidence keywords
-        const endTimeRegex = /[一二三四五六七八九十零\d]+\s*[:：分]\s*[一二三四五六七��九十零\d]+|结束|完毕|跳过|\d{3,}/; // Explicit timestamps
+        // Updated regex to include '.' as a valid time separator.
+        const endTimeRegex = /[一二三四五六七八九十零\d]+\s*[:：分\.]\s*[一二三四五六七八九十零\d]+|结束|完毕|跳过|\d{3,}/; 
 
         const filteredDanmaku = danmakuData.filter(d => {
             // A danmaku is relevant if it EITHER contains a high-confidence keyword OR a timestamp format.
@@ -82,7 +240,7 @@ async function getBilibiliVideoText(bvid) {
       log(`Error fetching danmaku: ${error}. Falling back to subtitles...`);
   }
 
-  // --- 3. Fallback to Subtitles ---
+  // --- 3. Fallback to Subtitles (if danmaku fails or has no ad info) ---
   try {
     const subtitleApiUrl = `https://api.bilibili.com/x/player/v2?cid=${cid}&bvid=${bvid}`;
     log(`Fetching subtitle list from: ${subtitleApiUrl}`);
@@ -262,25 +420,62 @@ async function handleBilibiliVideo(videoPlayer) {
 }
 
 function attachSkipListener(videoPlayer, adTimestamp) {
-    log(`Attaching skip listener for ad from ${adTimestamp.start}s to ${adTimestamp.end}s. Ad details: ${JSON.stringify(adTimestamp)}`);
-    
-    // To avoid attaching multiple intervals to the same player
-    if (videoPlayer.dataset.skipIntervalAttached) return;
-    videoPlayer.dataset.skipIntervalAttached = 'true';
+    log(`Attaching skip listener for ad from ${adTimestamp.start}s to ${adTimestamp.end}s.`);
 
-    const intervalId = setInterval(() => {
-        // If the video element is no longer in the DOM, stop the interval
+    // Clean up any previous listeners on this element to be safe
+    if (videoPlayer._adSkipTimeUpdateHandler) {
+        videoPlayer.removeEventListener('timeupdate', videoPlayer._adSkipTimeUpdateHandler);
+    }
+
+    // Handle case where listener attaches mid-ad
+    if (videoPlayer.currentTime >= adTimestamp.start && videoPlayer.currentTime < adTimestamp.end) {
+        log("Listener attached mid-ad. Skipping immediately.");
+        AdSkipperUIManager.init(videoPlayer);
+        AdSkipperUIManager.executeSkip(videoPlayer, adTimestamp);
+        return; // Ad is skipped, no need to attach a listener.
+    }
+
+    let promptShown = false;
+
+    const timeUpdateHandler = () => {
+        // If the element is gone, clean up and stop.
         if (!document.body.contains(videoPlayer)) {
-            log("Video player removed from DOM. Clearing skip interval.");
-            clearInterval(intervalId);
+            videoPlayer.removeEventListener('timeupdate', timeUpdateHandler);
+            AdSkipperUIManager.hide();
             return;
         }
 
-        if (videoPlayer.currentTime >= adTimestamp.start && videoPlayer.currentTime < adTimestamp.end) {
-            log(`Skipping ad... setting time to ${adTimestamp.end}. Current time: ${videoPlayer.currentTime}`);
-            videoPlayer.currentTime = adTimestamp.end;
+        const currentTime = videoPlayer.currentTime;
+        const promptTime = adTimestamp.start - 4;
+
+        // --- Condition 1: Show the prompt ---
+        if (currentTime >= promptTime && currentTime < adTimestamp.start) {
+            if (!promptShown) {
+                promptShown = true;
+                AdSkipperUIManager.showSkipPrompt(videoPlayer, adTimestamp);
+            }
+        } 
+        // --- Condition 2: Ad is playing, but prompt was missed (API lag, etc.) ---
+        else if (currentTime >= adTimestamp.start && currentTime < adTimestamp.end) {
+            // If the prompt was never shown (and not cancelled), skip immediately.
+            if (!promptShown && !AdSkipperUIManager.isCancelled) {
+                log("Ad already started, prompt missed. Skipping immediately.");
+                AdSkipperUIManager.init(videoPlayer);
+                AdSkipperUIManager.executeSkip(videoPlayer, adTimestamp);
+                // The skip is done, so we can remove the listener.
+                videoPlayer.removeEventListener('timeupdate', timeUpdateHandler);
+            }
         }
-    }, 250); // Check every 250ms
+        // --- Condition 3: We are past the ad segment ---
+        else if (currentTime >= adTimestamp.end) {
+            // Ad is over, clean everything up.
+            AdSkipperUIManager.hide();
+            videoPlayer.removeEventListener('timeupdate', timeUpdateHandler);
+        }
+    };
+
+    videoPlayer.addEventListener('timeupdate', timeUpdateHandler);
+    videoPlayer._adSkipTimeUpdateHandler = timeUpdateHandler; // Store a reference for future cleanup
 }
 
 
