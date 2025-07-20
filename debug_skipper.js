@@ -59,14 +59,15 @@ async function getBilibiliVideoText(bvid) {
     if (danmakuData.length > 0) {
         log(`Successfully extracted ${danmakuData.length} danmaku. Filtering for relevant comments...`);
 
-        const adKeywords = ['广告', '高能', '恰饭', '赞助', '付费', '推广', '跳', '郎', '了'];
-        // Regex to find timestamps like 3:07, 3分07, or end markers
-        const endTimeRegex = /[一二三四五六七八九十零\d]+\s*[:：分]\s*[一二三四五六七八九十零\d]+|结束|完毕|跳过|\d{3,}/;
+        // Reverting to a stricter filtering logic. The "Chinese+Number" heuristic was too broad.
+        const adKeywords = ['广告', '恰饭', '赞助', '付费', '推广']; // High-confidence keywords
+        const endTimeRegex = /[一二三四五六七八九十零\d]+\s*[:：分]\s*[一二三四五六七��九十零\d]+|结束|完毕|跳过|\d{3,}/; // Explicit timestamps
 
         const filteredDanmaku = danmakuData.filter(d => {
-            const hasKeyword = adKeywords.some(keyword => d.content.includes(keyword));
-            const hasEndTime = endTimeRegex.test(d.content);
-            return hasKeyword || hasEndTime;
+            // A danmaku is relevant if it EITHER contains a high-confidence keyword OR a timestamp format.
+            const hasAdKeyword = adKeywords.some(keyword => d.content.includes(keyword));
+            const hasTimestampFormat = endTimeRegex.test(d.content);
+            return hasAdKeyword || hasTimestampFormat;
         });
 
         log(`Filtered danmaku from ${danmakuData.length} to ${filteredDanmaku.length}.`);
@@ -116,51 +117,32 @@ async function callGeminiAPI(videoText, apiKey, apiEndpoint) {
 
   let prompt;
   if (videoText.type === 'subtitles') {
-    prompt = `
-      You are an expert at detecting advertisements in video transcripts.
-      Analyze the following subtitles and identify the start and end timestamps of any sponsored segments.
-      Return your answer as a single, clean JSON object with "start" and "end" keys in seconds.
-      For example: {"start": 123, "end": 184}
-      If no ad is found, return {"start": 0, "end": 0}.
-
-      Subtitles:
-      ---
-      ${videoText.content}
-      ---
-    `;
+    prompt = 'You are a data extraction robot. Your only task is to analyze the following video subtitles and identify the start and end timestamps of any sponsored segments.\n' +
+      'You MUST return a single, raw JSON object and nothing else. Do not include markdown, explanations, or any other text.\n' +
+      'The JSON object must have "start" and "end" keys in seconds.\n' +
+      'If no ad is found, return {"start": 0, "end": 0}.\n\n' +
+      'Subtitles:\n---\n' +
+      videoText.content + '\n---\n' +
+      'JSON output only:';
   } else { // Danmaku
-    prompt = `
-      You are an expert at analyzing Bilibili viewer comments (danmaku) to identify sponsored segments in a video.
-      You will be provided with a list of danmaku, each with an emission time (`time`) and its text (`content`).
-      The format is: `[{time: <seconds>, content: "<comment>"}, ...]`
-
-      Your task is to identify the start and end times of any sponsored segments based on these danmaku.
-
-      Here is how to determine the timestamps:
-      1.  **Start Time**: The ad starts at the `time` (emission time) of a danmaku that first indicates a sponsored segment. Indicators can be keywords like "广告", "恰饭", "高能", or a user pointing out an ad end time.
-      2.  **End Time**: The ad ends at the timestamp mentioned *within the `content`* of a danmaku. You must parse this timestamp.
-
-      **Crucial Logic:**
-      - A danmaku like `{"time": 172, "content": "我是3分27秒郎"}` means the ad **starts at 172 seconds** and **ends at 207 seconds** (3*60 + 27).
-      - The `time` property is the ad's START. The time mentioned in the `content` is the ad's END.
-      - If you find multiple ad-related danmaku, use the `time` of the earliest one for the "start" and the latest parsed timestamp from any of them for the "end".
-      - If a danmaku only indicates a start (e.g., `{"time": 170, "content": "前方高能"}`) and no other danmaku provides an end time, return the start time and set the end time to 0.
-      - You must understand Chinese internet slang, puns, and shorthand for timestamps. For example, "414" means 4:14, and "郎" (láng) is a pun for "了" (le), indicating completion.
-
-      Return your answer as a single, clean JSON object with "start" and "end" keys in seconds.
-      If no ad is found, return `{"start": 0, "end": 0}`.
-
-      Example Analysis:
-      Input: `[{"time": 172.2, "content": "我是三分二十七郎"}, {"time": 170.1, "content": "前方高能"}]`
-      - The earliest ad indicator is at 170.1s. So, `start` is 170.
-      - A danmaku provides an end time of 3m 27s = 207s. So, `end` is 207.
-      - Result: `{"start": 170, "end": 207}`
-
-      Danmaku Comments:
-      ---
-      ${JSON.stringify(videoText.data)}
-      ---
-    `;
+    prompt = 'You are an expert Bilibili comment analyst. Your goal is to analyze the provided danmaku comments to determine the start and end times of sponsored segments.\n\n' +
+      '**Core Logic: Prioritize the "Key Comment"**\n' +
+      'Your primary task is to find a "Key Comment" that defines the entire ad segment.\n\n' +
+      '1.  **What is a "Key Comment"?**\n' +
+      '    A comment like "我是四分三十五郎" or "谢谢你4分35狼" is a Key Comment. It contains everything needed.\n\n' +
+      '2.  **How to Process a Key Comment:**\n' +
+      '    - The `start` time is the `time` property of that specific comment.\n' +
+      '    - The `end` time is the time parsed from the `content` of that same comment (e.g., "四分三十五" -> 275).\n\n' +
+      '3.  **If multiple Key Comments exist,** synthesize them: use the `time` of the earliest one for the final `start`, and the parsed time from the one indicating the latest `end`.\n\n' +
+      '4.  **Fallback Plan:**\n' +
+      '    If, and only if, NO Key Comment is found, then you can analyze separate, non-key comments:\n' +
+      '    - Find the earliest `time` from a comment with a keyword (e.g., "赞助").\n' +
+      '    - Find the latest parsed time from a comment with a timestamp (e.g., "五分二十").\n\n' +
+      '**Output Format:**\n' +
+      'Return ONLY a single, raw JSON object: `{"start": <seconds>, "end": <seconds>}`. Do not include any other text. If no ad is found, return `{"start": 0, "end": 0}`.\n\n' +
+      'Danmaku Data:\n---\n' +
+      JSON.stringify(videoText.data) + '\n---\n' +
+      'JSON output only:';
   }
 
   try {
@@ -220,25 +202,23 @@ async function callGeminiAPI(videoText, apiKey, apiEndpoint) {
 }
 
 async function handleBilibiliVideo(videoPlayer) {
-    if (videoPlayer.dataset.aiSkipperAttached) return;
-    videoPlayer.dataset.aiSkipperAttached = 'true';
-    log("AI Skipper attached to new Bilibili video.");
-
-    let bvid = window.__INITIAL_STATE__?.bvid;
+    // Get the unique video ID (bvid)
+    let bvid = window.__INITIAL_STATE__?.bvid || window.location.href.match(/BV[a-zA-Z0-9_]{10}/)?.[0];
 
     if (!bvid) {
-        log("bvid not found in __INITIAL_STATE__, trying to parse from URL.");
-        const match = window.location.href.match(/BV[a-zA-Z0-9_]{10}/);
-        if (match) {
-            bvid = match[0];
-            log(`Found bvid in URL: ${bvid}`);
-        }
+        log("Could not get bvid. AI skipper cannot run.");
+        return;
     }
 
-    if (!bvid) {
-        log("Could not get bvid from any source. AI skipper cannot run.");
-        return; // Cannot proceed without bvid
+    // If the skipper is already attached and running for the *current* video, do nothing.
+    if (videoPlayer.dataset.attachedBvid === bvid) {
+        return;
     }
+
+    // --- New video detected ---
+    log(`New video detected (BVID: ${bvid}). Initializing skipper.`);
+    videoPlayer.dataset.attachedBvid = bvid; // Mark the player with the new BVID
+    delete videoPlayer.dataset.skipIntervalAttached; // Reset the interval flag for the new video
 
     // 1. Check local cache first
     const cacheKey = `bvid-${bvid}`;
@@ -251,23 +231,19 @@ async function handleBilibiliVideo(videoPlayer) {
             }
         } else {
             log(`Cache miss for ${bvid}. Proceeding with API call.`);
-            // 2. Get Video Text (Subtitles or Danmaku)
             const videoText = await getBilibiliVideoText(bvid);
             if (!videoText) {
                 log("Could not get video text, AI skipper will not run.");
                 return;
             }
 
-            // 3. Call Gemini API
             const apiKey = "AIzaSyASbNd_JefjCz8MDxixBLnI-IWWZssEqLk";
-            const apiEndpoint = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent"; // Use gemini-2.5-flash model
+            const apiEndpoint = "https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent";
             const adTimestamp = await callGeminiAPI(videoText, apiKey, apiEndpoint);
 
-            // 4. Process and cache the result
             if (adTimestamp) {
-                // If only start time is provided, set a default end time
                 if (adTimestamp.start > 0 && adTimestamp.end === 0) {
-                    const DEFAULT_AD_DURATION = 60; // seconds
+                    const DEFAULT_AD_DURATION = 60;
                     adTimestamp.end = adTimestamp.start + DEFAULT_AD_DURATION;
                     log(`Inferred ad end time: ${adTimestamp.end}s (default duration).`);
                 }
