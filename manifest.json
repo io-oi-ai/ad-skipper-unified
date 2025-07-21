@@ -1,12 +1,10 @@
 {
   "manifest_version": 3,
-  "name": "Universal Ad & Sponsor Skipper",
-  "version": "1.2",
+  "name": "Ad & Sponsor Skipper",
+  "version": "1.0",
   "description": "Automatically skip ads and sponsored content on YouTube and Bilibili",
   "permissions": [
-    "storage",
-    "tabs",
-    "webNavigation"
+    "storage"
   ],
   "host_permissions": [
     "*://*.youtube.com/*",
