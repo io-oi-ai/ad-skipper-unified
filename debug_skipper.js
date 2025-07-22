@@ -1,11 +1,168 @@
 // debug_skipper.js - FINAL VERSION
 
+// --- Style Injection ---
+function injectStyles() {
+  const style = document.createElement('style');
+  style.textContent = `
+    .ad-skipper-ui-container {
+      position: absolute;
+      bottom: 80px; /* Adjusted for better placement near progress bar */
+      left: 20px;
+      z-index: 99999;
+      opacity: 0;
+      transition: opacity 0.3s ease-in-out;
+      pointer-events: none;
+    }
+    .ad-skipper-ui-container.visible {
+      opacity: 1;
+      pointer-events: all;
+    }
+    .ad-skipper-prompt {
+      background-color: rgba(0, 0, 0, 0.7);
+      color: white;
+      padding: 10px 20px;
+      border-radius: 20px;
+      font-size: 14px;
+      display: flex;
+      align-items: center;
+      box-shadow: 0 2px 10px rgba(0,0,0,0.2);
+    }
+    .ad-skipper-prompt-text {
+      margin-right: 15px;
+    }
+    .ad-skipper-cancel-button {
+      background: none;
+      border: none;
+      color: #ff5c5c;
+      cursor: pointer;
+      font-size: 14px;
+      padding: 0;
+    }
+    .ad-skipper-cancel-button:hover {
+      text-decoration: underline;
+    }
+  `;
+  document.head.appendChild(style);
+}
+injectStyles();
+
+// --- UI Manager ---
+const AdSkipperUIManager = {
+  uiContainer: null,
+  skipTimeout: null,
+  isCancelled: false,
+
+  init(videoPlayer) {
+    if (!this.uiContainer) {
+      this.uiContainer = document.createElement('div');
+      this.uiContainer.className = 'ad-skipper-ui-container';
+      const playerContainer = videoPlayer.closest('.bpx-player-container');
+      if (playerContainer) {
+        playerContainer.style.position = 'relative';
+        playerContainer.appendChild(this.uiContainer);
+      } else {
+        document.body.appendChild(this.uiContainer); // Fallback
+      }
+    }
+  },
+
+  showSkipPrompt(videoPlayer, adTimestamp) {
+    this.isCancelled = false;
+    this.init(videoPlayer);
+
+    this.uiContainer.innerHTML = `
+      <div class="ad-skipper-prompt">
+        <span class="ad-skipper-prompt-text">即将为您跳过广告</span>
+        <button class="ad-skipper-cancel-button">不跳过</button>
+      </div>
+    `;
+    this.uiContainer.classList.add('visible');
+
+    const cancelButton = this.uiContainer.querySelector('.ad-skipper-cancel-button');
+    cancelButton.onclick = () => {
+      this.isCancelled = true;
+      this.hide();
+      log("Ad skip cancelled by user.");
+    };
+
+    this.skipTimeout = setTimeout(() => {
+      if (!this.isCancelled) {
+        this.executeSkip(videoPlayer, adTimestamp);
+      }
+    }, 3000);
+  },
+
+  executeSkip(videoPlayer, adTimestamp) {
+    log(`Skipping ad... setting time to ${adTimestamp.end}. Current time: ${videoPlayer.currentTime}`);
+    videoPlayer.currentTime = adTimestamp.end;
+    this.showSkippedMessage();
+  },
+
+  showSkippedMessage() {
+    this.uiContainer.innerHTML = `
+      <div class="ad-skipper-prompt">
+        <span class="ad-skipper-prompt-text">已为您跳过广告</span>
+      </div>
+    `;
+    this.uiContainer.classList.add('visible');
+    setTimeout(() => this.hide(), 2000);
+  },
+
+  hide() {
+    if (this.uiContainer) {
+      this.uiContainer.classList.remove('visible');
+    }
+    if (this.skipTimeout) {
+      clearTimeout(this.skipTimeout);
+      this.skipTimeout = null;
+    }
+  }
+};
+
 function log(message) {
   console.log(`[Ad Skipper] ${message}`);
 }
 
 // --- Bilibili AI Ad Skipper ---
 async function getBilibiliVideoText(bvid) {
+  const FORCE_SUBTITLE_TEST = false; // Set to true to test subtitle fetching, false for normal operation.
+
+  if (FORCE_SUBTITLE_TEST) {
+    log("--- SUBTITLE TEST MODE ACTIVE ---");
+    try {
+      const pageListUrl = `https://api.bilibili.com/x/player/pagelist?bvid=${bvid}`;
+      const pageListResponse = await fetch(pageListUrl);
+      const pageListData = await pageListResponse.json();
+      if (pageListData.code !== 0 || !pageListData.data?.[0]?.cid) {
+        throw new Error("Failed to get CID for subtitle test.");
+      }
+      const cid = pageListData.data[0].cid;
+
+      const subtitleApiUrl = `https://api.bilibili.com/x/player/v2?cid=${cid}&bvid=${bvid}`;
+      log(`Fetching subtitle list from: ${subtitleApiUrl}`);
+      const response = await fetch(subtitleApiUrl);
+      const data = await response.json();
+
+      if (data.code === 0 && data.data.subtitle?.subtitles?.length > 0) {
+          let subtitleUrl = data.data.subtitle.subtitles[0].subtitle_url;
+          if (subtitleUrl.startsWith('http://')) {
+              subtitleUrl = subtitleUrl.replace('http://', 'https://');
+          }
+          log(`Found subtitle URL: ${subtitleUrl}`);
+          const subtitleResponse = await fetch(subtitleUrl);
+          const subtitleData = await subtitleResponse.json();
+          console.log("--- Successfully Fetched Subtitle JSON: ---");
+          console.log(subtitleData); // Log the full subtitle JSON for inspection
+          return null; // Stop further execution in test mode
+      } else {
+        log("No subtitles found for this video.");
+      }
+    } catch (error) {
+        log(`Error during subtitle test: ${error}`);
+    }
+    return null; // Stop further execution in test mode
+  }
+
   log("Attempting to extract Bilibili video text (subtitles/danmaku)...");
 
   // --- 1. Get CID ---
@@ -59,14 +216,16 @@ async function getBilibiliVideoText(bvid) {
     if (danmakuData.length > 0) {
         log(`Successfully extracted ${danmakuData.length} danmaku. Filtering for relevant comments...`);
 
-        const adKeywords = ['广告', '高能', '恰饭', '赞助', '付费', '推广', '跳', '郎', '了'];
-        // Regex to find timestamps like 3:07, 3分07, or end markers
-        const endTimeRegex = /[一二三四五六七八九十零\d]+\s*[:：分]\s*[一二三四五六七八九十零\d]+|结束|完毕|跳过|\d{3,}/;
+        // Reverting to a stricter filtering logic. The "Chinese+Number" heuristic was too broad.
+        const adKeywords = ['广告', '恰饭', '赞助', '付费', '推广']; // High-confidence keywords
+        // Updated regex to include '.' as a valid time separator.
+        const endTimeRegex = /[一二三四五六七八九十零\d]+\s*[:：分\.]\s*[一二三四五六七八九十零\d]+|结束|完毕|跳过|\d{3,}/; 
 
         const filteredDanmaku = danmakuData.filter(d => {
-            const hasKeyword = adKeywords.some(keyword => d.content.includes(keyword));
-            const hasEndTime = endTimeRegex.test(d.content);
-            return hasKeyword || hasEndTime;
+            // A danmaku is relevant if it EITHER contains a high-confidence keyword OR a timestamp format.
+            const hasAdKeyword = adKeywords.some(keyword => d.content.includes(keyword));
+            const hasTimestampFormat = endTimeRegex.test(d.content);
+            return hasAdKeyword || hasTimestampFormat;
         });
 
         log(`Filtered danmaku from ${danmakuData.length} to ${filteredDanmaku.length}.`);
@@ -81,7 +240,7 @@ async function getBilibiliVideoText(bvid) {
       log(`Error fetching danmaku: ${error}. Falling back to subtitles...`);
   }
 
-  // --- 3. Fallback to Subtitles ---
+  // --- 3. Fallback to Subtitles (if danmaku fails or has no ad info) ---
   try {
     const subtitleApiUrl = `https://api.bilibili.com/x/player/v2?cid=${cid}&bvid=${bvid}`;
     log(`Fetching subtitle list from: ${subtitleApiUrl}`);
@@ -116,51 +275,33 @@ async function callGeminiAPI(videoText, apiKey, apiEndpoint) {
 
   let prompt;
   if (videoText.type === 'subtitles') {
-    prompt = `
-      You are an expert at detecting advertisements in video transcripts.
-      Analyze the following subtitles and identify the start and end timestamps of any sponsored segments.
-      Return your answer as a single, clean JSON object with "start" and "end" keys in seconds.
-      For example: {"start": 123, "end": 184}
-      If no ad is found, return {"start": 0, "end": 0}.
-
-      Subtitles:
-      ---
-      ${videoText.content}
-      ---
-    `;
+    prompt = 'You are a data extraction robot. Your only task is to analyze the following video subtitles and identify the start and end timestamps of any sponsored segments.\n' +
+      'You MUST return a single, raw JSON object and nothing else. Do not include markdown, explanations, or any other text.\n' +
+      'The JSON object must have "start" and "end" keys in seconds.\n' +
+      'If no ad is found, return {"start": 0, "end": 0}.\n\n' +
+      'Subtitles:\n---\n' +
+      videoText.content + '\n---\n' +
+      'JSON output only:';
   } else { // Danmaku
-    prompt = `
-      You are an expert at analyzing Bilibili viewer comments (danmaku) to identify sponsored segments in a video.
-      You will be provided with a list of danmaku, each with an emission time (`time`) and its text (`content`).
-      The format is: [{"time": <seconds>, "content": "<comment>"}, ...]
-
-      Your task is to identify the start and end times of any sponsored segments based on these danmaku.
-
-      Here is how to determine the timestamps:
-      1.  **Start Time**: The ad starts at the `time` (emission time) of a danmaku that first indicates a sponsored segment. Indicators can be keywords like "广告", "恰饭", "高能", or a user pointing out an ad end time.
-      2.  **End Time**: The ad ends at the timestamp mentioned *within the `content`* of a danmaku. You must parse this timestamp.
-
-      **Crucial Logic:**
-      - A danmaku like `{"time": 172, "content": "我是3分27秒郎"}` means the ad **starts at 172 seconds** and **ends at 207 seconds** (3*60 + 27).
-      - The `time` property is the ad's START. The time mentioned in the `content` is the ad's END.
-      - If you find multiple ad-related danmaku, use the `time` of the earliest one for the "start" and the latest parsed timestamp from any of them for the "end".
-      - If a danmaku only indicates a start (e.g., `{"time": 170, "content": "前方高能"}`) and no other danmaku provides an end time, return the start time and set the end time to 0.
-      - You must understand Chinese internet slang, puns, and shorthand for timestamps. For example, "414" means 4:14, and "郎" (láng) is a pun for "了" (le), indicating completion.
-
-      Return your answer as a single, clean JSON object with "start" and "end" keys in seconds.
-      If no ad is found, return `{"start": 0, "end": 0}`.
-
-      Example Analysis:
-      Input: `[{"time": 172.2, "content": "我是三分二十七郎"}, {"time": 170.1, "content": "前方高能"}]`
-      - The earliest ad indicator is at 170.1s. So, `start` is 170.
-      - A danmaku provides an end time of 3m 27s = 207s. So, `end` is 207.
-      - Result: `{"start": 170, "end": 207}`
-
-      Danmaku Comments:
-      ---
-      ${JSON.stringify(videoText.data)}
-      ---
-    `;
+<<<<<<< HEAD
+    prompt = 'You are an expert Bilibili comment analyst. Your goal is to analyze the provided danmaku comments to determine the start and end times of sponsored segments.\n\n' +
+      '**Core Logic: Prioritize the "Key Comment"**\n' +
+      'Your primary task is to find a "Key Comment" that defines the entire ad segment.\n\n' +
+      '1.  **What is a "Key Comment"?**\n' +
+      '    A comment like "我是四分三十五郎" or "谢谢你4分35狼" is a Key Comment. It contains everything needed.\n\n' +
+      '2.  **How to Process a Key Comment:**\n' +
+      '    - The `start` time is the `time` property of that specific comment.\n' +
+      '    - The `end` time is the time parsed from the `content` of that same comment (e.g., "四分三十五" -> 275).\n\n' +
+      '3.  **If multiple Key Comments exist,** synthesize them: use the `time` of the earliest one for the final `start`, and the parsed time from the one indicating the latest `end`.\n\n' +
+      '4.  **Fallback Plan:**\n' +
+      '    If, and only if, NO Key Comment is found, then you can analyze separate, non-key comments:\n' +
+      '    - Find the earliest `time` from a comment with a keyword (e.g., "赞助").\n' +
+      '    - Find the latest parsed time from a comment with a timestamp (e.g., "五分二十").\n\n' +
+'**Output Format:**\n' +
+      'Return ONLY a single, raw JSON object: `{"start": <seconds>, "end": <seconds>}`. Do not include any other text. If no ad is found, return `{"start": 0, "end": 0}`.\n\n' +
+      'Danmaku Data:\n---\n' +
+      JSON.stringify(videoText.data) + '\n---\n' +
+      'JSON output only:';
   }
 
   try {
@@ -220,25 +361,23 @@ async function callGeminiAPI(videoText, apiKey, apiEndpoint) {
 }
 
 async function handleBilibiliVideo(videoPlayer) {
-    if (videoPlayer.dataset.aiSkipperAttached) return;
-    videoPlayer.dataset.aiSkipperAttached = 'true';
-    log("AI Skipper attached to new Bilibili video.");
-
-    let bvid = window.__INITIAL_STATE__?.bvid;
+    // Get the unique video ID (bvid)
+    let bvid = window.__INITIAL_STATE__?.bvid || window.location.href.match(/BV[a-zA-Z0-9_]{10}/)?.[0];
 
     if (!bvid) {
-        log("bvid not found in __INITIAL_STATE__, trying to parse from URL.");
-        const match = window.location.href.match(/BV[a-zA-Z0-9_]{10}/);
-        if (match) {
-            bvid = match[0];
-            log(`Found bvid in URL: ${bvid}`);
-        }
+        log("Could not get bvid. AI skipper cannot run.");
+        return;
     }
 
-    if (!bvid) {
-        log("Could not get bvid from any source. AI skipper cannot run.");
-        return; // Cannot proceed without bvid
+    // If the skipper is already attached and running for the *current* video, do nothing.
+    if (videoPlayer.dataset.attachedBvid === bvid) {
+        return;
     }
+
+    // --- New video detected ---
+    log(`New video detected (BVID: ${bvid}). Initializing skipper.`);
+    videoPlayer.dataset.attachedBvid = bvid; // Mark the player with the new BVID
+    delete videoPlayer.dataset.skipIntervalAttached; // Reset the interval flag for the new video
 
     // 1. Check local cache first
     const cacheKey = `bvid-${bvid}`;
@@ -251,23 +390,19 @@ async function handleBilibiliVideo(videoPlayer) {
             }
         } else {
             log(`Cache miss for ${bvid}. Proceeding with API call.`);
-            // 2. Get Video Text (Subtitles or Danmaku)
             const videoText = await getBilibiliVideoText(bvid);
             if (!videoText) {
                 log("Could not get video text, AI skipper will not run.");
                 return;
             }
 
-            // 3. Call Gemini API
             const apiKey = "AIzaSyASbNd_JefjCz8MDxixBLnI-IWWZssEqLk";
-            const apiEndpoint = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent"; // Use gemini-2.5-flash model
+            const apiEndpoint = "https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent";
             const adTimestamp = await callGeminiAPI(videoText, apiKey, apiEndpoint);
 
-            // 4. Process and cache the result
             if (adTimestamp) {
-                // If only start time is provided, set a default end time
                 if (adTimestamp.start > 0 && adTimestamp.end === 0) {
-                    const DEFAULT_AD_DURATION = 60; // seconds
+                    const DEFAULT_AD_DURATION = 60;
                     adTimestamp.end = adTimestamp.start + DEFAULT_AD_DURATION;
                     log(`Inferred ad end time: ${adTimestamp.end}s (default duration).`);
                 }
@@ -286,25 +421,62 @@ async function handleBilibiliVideo(videoPlayer) {
 }
 
 function attachSkipListener(videoPlayer, adTimestamp) {
-    log(`Attaching skip listener for ad from ${adTimestamp.start}s to ${adTimestamp.end}s. Ad details: ${JSON.stringify(adTimestamp)}`);
-    
-    // To avoid attaching multiple intervals to the same player
-    if (videoPlayer.dataset.skipIntervalAttached) return;
-    videoPlayer.dataset.skipIntervalAttached = 'true';
+    log(`Attaching skip listener for ad from ${adTimestamp.start}s to ${adTimestamp.end}s.`);
 
-    const intervalId = setInterval(() => {
-        // If the video element is no longer in the DOM, stop the interval
+    // Clean up any previous listeners on this element to be safe
+    if (videoPlayer._adSkipTimeUpdateHandler) {
+        videoPlayer.removeEventListener('timeupdate', videoPlayer._adSkipTimeUpdateHandler);
+    }
+
+    // Handle case where listener attaches mid-ad
+    if (videoPlayer.currentTime >= adTimestamp.start && videoPlayer.currentTime < adTimestamp.end) {
+        log("Listener attached mid-ad. Skipping immediately.");
+        AdSkipperUIManager.init(videoPlayer);
+        AdSkipperUIManager.executeSkip(videoPlayer, adTimestamp);
+        return; // Ad is skipped, no need to attach a listener.
+    }
+
+    let promptShown = false;
+
+    const timeUpdateHandler = () => {
+        // If the element is gone, clean up and stop.
         if (!document.body.contains(videoPlayer)) {
-            log("Video player removed from DOM. Clearing skip interval.");
-            clearInterval(intervalId);
+            videoPlayer.removeEventListener('timeupdate', timeUpdateHandler);
+            AdSkipperUIManager.hide();
             return;
         }
 
-        if (videoPlayer.currentTime >= adTimestamp.start && videoPlayer.currentTime < adTimestamp.end) {
-            log(`Skipping ad... setting time to ${adTimestamp.end}. Current time: ${videoPlayer.currentTime}`);
-            videoPlayer.currentTime = adTimestamp.end;
+        const currentTime = videoPlayer.currentTime;
+        const promptTime = adTimestamp.start - 4;
+
+        // --- Condition 1: Show the prompt ---
+        if (currentTime >= promptTime && currentTime < adTimestamp.start) {
+            if (!promptShown) {
+                promptShown = true;
+                AdSkipperUIManager.showSkipPrompt(videoPlayer, adTimestamp);
+            }
+        } 
+        // --- Condition 2: Ad is playing, but prompt was missed (API lag, etc.) ---
+        else if (currentTime >= adTimestamp.start && currentTime < adTimestamp.end) {
+            // If the prompt was never shown (and not cancelled), skip immediately.
+            if (!promptShown && !AdSkipperUIManager.isCancelled) {
+                log("Ad already started, prompt missed. Skipping immediately.");
+                AdSkipperUIManager.init(videoPlayer);
+                AdSkipperUIManager.executeSkip(videoPlayer, adTimestamp);
+                // The skip is done, so we can remove the listener.
+                videoPlayer.removeEventListener('timeupdate', timeUpdateHandler);
+            }
         }
-    }, 250); // Check every 250ms
+        // --- Condition 3: We are past the ad segment ---
+        else if (currentTime >= adTimestamp.end) {
+            // Ad is over, clean everything up.
+            AdSkipperUIManager.hide();
+            videoPlayer.removeEventListener('timeupdate', timeUpdateHandler);
+        }
+    };
+
+    videoPlayer.addEventListener('timeupdate', timeUpdateHandler);
+    videoPlayer._adSkipTimeUpdateHandler = timeUpdateHandler; // Store a reference for future cleanup
 }
 
 
