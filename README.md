@@ -1,6 +1,6 @@
 # Universal Ad & Sponsor Skipper
 
-这是一个强大的浏览器扩展，可以自动跳过 YouTube 和 Bilibili 平台上的广告和视频内的赞助商内容。
+这是一个强大的浏览器扩展，可以自动跳过 YouTube 和 Bilibili 平台上的广告和视频内的赞助商内容。你可以在谷歌商店进行下载：https://chromewebstore.google.com/detail/b%E7%AB%99%E5%B9%BF%E5%91%8A%E7%A7%92%E8%B7%B3%E5%8A%A9%E6%89%8B/eccepdepmolbihaihmkcklficikccaik?authuser=1&hl=zh-CN
 
 ## 主要功能
 
